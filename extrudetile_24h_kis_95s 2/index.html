@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>3D Visualization with Mapbox</title>
+<meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css" rel="stylesheet">
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js"></script>
+<style>
+  body { margin: 0; padding: 0; }
+  #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+  #hour-display {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background-color: rgba(0, 0, 0, 0.5);
+    color: white;
+    padding: 5px 10px;
+    font-family: Arial, sans-serif;
+    font-size: 46px;
+    border-radius: 3px;
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="hour-display">Hour: 00</div>
+
+<script>
+mapboxgl.accessToken = 'pk.eyJ1Ijoic2xvbm8iLCJhIjoiY2p6Zmg2dDdlMDZzZTNib280Y3phN29jciJ9.JCddta2wHSt2t71JUVR7UQ';
+
+const map = new mapboxgl.Map({
+  container: 'map',
+  style: 'mapbox://styles/mapbox/dark-v10',
+  center: [9.192254, 45.462633],
+  zoom: 15.3,
+  pitch: 45,
+  bearing: -17.6,
+});
+
+map.on('load', () => {
+    // Add lighting settings
+    map.setLight({
+      anchor: 'viewport',
+      color: 'white',
+      intensity: 0.5,
+      position: [1, 205, 30]  // Directional light position
+    });
+
+    // Add 3D buildings from OSM
+    map.addLayer({
+      'id': '3d-buildings',
+      'source': 'composite',
+      'source-layer': 'building',
+      'filter': ['==', 'extrude', 'true'],
+      'type': 'fill-extrusion',
+      'minzoom': 14.5,
+      'paint': {
+        'fill-extrusion-color': '#aaa',
+        'fill-extrusion-height': ['get', 'height'],
+        'fill-extrusion-height-transition': {
+          duration: 2000,
+          delay: 0
+        },
+        'fill-extrusion-opacity': 0.6
+      }
+    });
+
+    // Add remote tileset and visualize 'density' field
+    map.addSource('density-tileset', {
+      'type': 'vector',
+      'url': 'mapbox://slono.2sgv5uiu' 
+    });
+
+    // Initial layer settings for density
+    map.addLayer({
+      'id': 'density-3d',
+      'type': 'fill-extrusion',
+      'source': 'density-tileset',
+      'source-layer': 'KI_s-aywqrq',
+      'minzoom': 14.5,
+      'paint': {
+        'fill-extrusion-color': [
+          'interpolate',
+          ['linear'],
+          ['get', 'KI_s0095'], // Start with density00
+          0.005858, '#00FF00',
+          0.006, '#FFFF00',
+          0.0062, '#FF0000'
+        ],
+        'fill-extrusion-height': [
+          'interpolate',
+          ['linear'],
+          ['get', 'KI_s0095'], // Start with density00
+          0.005858, 0,
+          0.0062, 50
+        ],
+        'fill-extrusion-base': 0,
+        'fill-extrusion-opacity': 0.9,
+        'fill-extrusion-height-transition': {
+          duration: 1000,
+          delay: 0
+        },
+        'fill-extrusion-color-transition': {
+          duration: 1000,
+          delay: 0
+        }
+      }
+    });
+  const totalSteps = 5;
+  const stepDuration = 40; // ms
+  const hourDuration = stepDuration * totalSteps; // ms
+  const dayDuration = hourDuration * 24; // ms
+  const hourDisplay = document.getElementById('hour-display');
+
+  let globalTimer = 0;
+
+  const getDensityField = (hour) => {
+    return 'KI_s' + (hour < 10 ? '0' + hour : hour) + '95';
+  };
+
+  const updateVisualization = () => {
+    const currentTime = globalTimer % dayDuration;
+    const currentHour = Math.floor(currentTime / hourDuration);
+    const nextHour = (currentHour + 1) % 24;
+    const hourProgress = (currentTime % hourDuration) / hourDuration;
+
+    const currentField = getDensityField(currentHour);
+    const nextField = getDensityField(nextHour);
+
+    // Interpolate between current and next hour
+    const interpolatedExpression = [
+      'interpolate',
+      ['linear'],
+      ['+', 
+        ['*', ['-', 1, hourProgress], ['number', ['get', currentField]]],
+        ['*', hourProgress, ['number', ['get', nextField]]]
+      ],
+      0.005858, 0,
+      0.006, 25,
+      0.0062, 50
+    ];
+
+    // Update height
+    map.setPaintProperty('density-3d', 'fill-extrusion-height', interpolatedExpression);
+
+    // Update color
+    const colorExpression = [
+      'interpolate',
+      ['linear'],
+      ['+', 
+        ['*', ['-', 1, hourProgress], ['number', ['get', currentField]]],
+        ['*', hourProgress, ['number', ['get', nextField]]]
+      ],
+      0.005858, '#00FF00',
+      0.006, '#FFFF00',
+      0.0062, '#FF0000'
+    ];
+
+    map.setPaintProperty('density-3d', 'fill-extrusion-color', colorExpression);
+
+    // Update hour display
+    hourDisplay.textContent = `Hour: ${(currentHour < 10 ? '0' : '') + currentHour}`;
+  };
+
+  const animate = (currentTime) => {
+    if (!globalTimer) globalTimer = currentTime;
+    const deltaTime = currentTime - globalTimer;
+    globalTimer += deltaTime;
+
+    updateVisualization();
+
+    requestAnimationFrame(animate);
+  };
+
+  requestAnimationFrame(animate);
+});
+</script>
+
+</body>
+</html>

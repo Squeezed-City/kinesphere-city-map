@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>3D Visualization with Mapbox</title>
+<meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css" rel="stylesheet">
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
+<style>
+  body { margin: 0; padding: 0; }
+  #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+  #hour-display {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background-color: rgba(0, 0, 0, 0.5);
+    color: white;
+    padding: 5px 10px;
+    font-family: Arial, sans-serif;
+    font-size: 46px;
+    border-radius: 3px;
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="hour-display">Hour: 00</div>
+
+<script>
+mapboxgl.accessToken = 'pk.eyJ1Ijoic2xvbm8iLCJhIjoiY2p6Zmg2dDdlMDZzZTNib280Y3phN29jciJ9.JCddta2wHSt2t71JUVR7UQ';
+
+const map = new mapboxgl.Map({
+  container: 'map',
+  style: 'mapbox://styles/mapbox/dark-v10',
+  center: [9.192254, 45.462633],
+  zoom: 15.3,
+  pitch: 45,
+  bearing: -17.6,
+});
+
+map.on('load', () => {
+  map.setLight({
+    anchor: 'viewport',
+    color: 'white',
+    intensity: 0.5,
+    position: [1, 205, 30]
+  });
+
+  map.addLayer({
+    'id': '3d-buildings',
+    'source': 'composite',
+    'source-layer': 'building',
+    'filter': ['==', 'extrude', 'true'],
+    'type': 'fill-extrusion',
+    'minzoom': 14.5,
+    'paint': {
+      'fill-extrusion-color': '#aaa',
+      'fill-extrusion-height': ['get', 'height'],
+      'fill-extrusion-opacity': 0.6
+    }
+  });
+
+  Promise.all([
+    new Promise((resolve, reject) => {
+      map.loadImage('p64.jpg', (error, image) => {
+        if (error) reject(error);
+        map.addImage('pattern-image-1', image);
+        resolve();
+      });
+    }),
+    new Promise((resolve, reject) => {
+      map.loadImage('q.jpg', (error, image) => {
+        if (error) reject(error);
+        map.addImage('pattern-image-2', image);
+        resolve();
+      });
+    })
+  ]).then(() => {
+    addDensityLayers();
+    startHourlyUpdates();
+  }).catch(error => console.error('Error loading images:', error));
+
+  function addDensityLayers() {
+    map.addSource('density-tileset', {
+      'type': 'vector',
+      'url': 'mapbox://slono.2sgv5uiu' 
+    });
+
+    map.addLayer({
+      'id': 'density-3d',
+      'type': 'fill-extrusion',
+      'source': 'density-tileset',
+      'source-layer': 'KI_s-aywqrq',
+      'minzoom': 14.5,
+      'paint': {
+        'fill-extrusion-color': [
+          'interpolate',
+          ['linear'],
+          ['get', 'KI_s0095'],
+          0.005858, '#00FF00',
+          0.006, '#FFFF00', 
+          0.0062, '#FF0000'
+        ],
+        'fill-extrusion-height': [
+          'interpolate',
+          ['linear'],
+          ['get', 'KI_s0095'],
+          0.005858, 0,
+          0.0062, 50
+        ],
+        'fill-extrusion-base': 0,
+        'fill-extrusion-opacity': 0.9,
+        'fill-extrusion-pattern': [
+          'case',
+          ['all', 
+            ['>=', ['get', 'KI_s0095'], 0.0058],
+            ['<', ['get', 'KI_s0095'], 0.00595]
+          ],
+          'pattern-image-2',
+          ['>=', ['get', 'KI_s0095'], 0.00595],
+          'pattern-image-1',
+          ''
+        ]
+      }
+    });
+
+    map.addLayer({
+      'id': 'density-labels',
+      'type': 'symbol',
+      'source': 'density-tileset',
+      'source-layer': 'KI_s-aywqrq',
+      'minzoom': 14.5,
+      'layout': {
+        'text-field': ['number-format', ['get', 'KI_s0095'], {'maxFractionDigits': 6}],
+        'text-size': 12,
+        'text-allow-overlap': true,
+        'text-ignore-placement': true,
+        'text-anchor': 'center',
+        'text-offset': [0, 0]
+      },
+      'paint': {
+        'text-color': 'white',
+        'text-halo-color': 'rgba(0, 0, 0, 0.5)',
+        'text-halo-width': 1
+      }
+    });
+  }
+
+  function startHourlyUpdates() {
+    let currentHour = 0;
+    const hourDisplay = document.getElementById('hour-display');
+
+    function changeDensityHour() {
+      const nextHour = (currentHour < 23) ? currentHour + 1 : 0;
+      const densityField = 'KI_s' + (nextHour < 10 ? '0' + nextHour : nextHour) + '95';
+
+      map.setPaintProperty('density-3d', 'fill-extrusion-color', [
+        'interpolate',
+        ['linear'],
+        ['get', densityField],
+        0.005858, '#00FF00',
+        0.006, '#FFFF00',
+        0.0062, '#FF0000'
+      ]);
+
+      map.setPaintProperty('density-3d', 'fill-extrusion-height', [
+        'interpolate',
+        ['linear'],
+        ['get', densityField],
+        0.005858, 0,
+        0.0062, 50
+      ]);
+
+      map.setPaintProperty('density-3d', 'fill-extrusion-pattern', [
+        'case',
+        ['all', 
+          ['>=', ['get', densityField], 0.0058],
+          ['<', ['get', densityField], 0.00595]
+        ],
+        'pattern-image-2',
+        ['>=', ['get', densityField], 0.00595],
+        'pattern-image-1',
+        ''
+      ]);
+
+      map.setLayoutProperty('density-labels', 'text-field', 
+        ['number-format', ['get', densityField], {'maxFractionDigits': 6}]
+      );
+
+      hourDisplay.textContent = `Hour: ${(nextHour < 10 ? '0' : '') + nextHour}`;
+      currentHour = nextHour;
+    }
+
+    setInterval(changeDensityHour, 200);
+  }
+});
+</script>
+
+</body>
+</html>

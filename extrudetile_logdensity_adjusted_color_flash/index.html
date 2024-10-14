@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>3D Visualization with Mapbox</title>
+<meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css" rel="stylesheet">
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
+<style>
+  body { margin: 0; padding: 0; }
+  #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<script>
+mapboxgl.accessToken = 'pk.eyJ1Ijoic2xvbm8iLCJhIjoiY2p6Zmg2dDdlMDZzZTNib280Y3phN29jciJ9.JCddta2wHSt2t71JUVR7UQ';
+
+  const map = new mapboxgl.Map({
+    container: 'map',
+    style: 'mapbox://styles/mapbox/dark-v10',
+    center: [9.192254, 45.462633],
+    zoom: 15.3,
+    pitch: 45,
+    bearing: -17.6,
+  });
+
+  map.on('load', () => {
+    map.setLight({
+      anchor: 'viewport',
+      color: 'white',
+      intensity: 0.5,
+      position: [1, 205, 30]
+    });
+
+    map.addLayer({
+      'id': '3d-buildings',
+      'source': 'composite',
+      'source-layer': 'building',
+      'filter': ['==', 'extrude', 'true'],
+      'type': 'fill-extrusion',
+      'minzoom': 14.5,
+      'paint': {
+        'fill-extrusion-color': '#aaa',
+        'fill-extrusion-height': ['get', 'height'],
+        'fill-extrusion-opacity': 0.6
+      }
+    });
+
+    map.addSource('density-tileset', {
+      'type': 'vector',
+      'url': 'mapbox://slono.bj7soaw3' 
+    });
+
+    map.addLayer({
+      'id': 'density-3d',
+      'type': 'fill-extrusion',
+      'source': 'density-tileset',
+      'source-layer': 'OnlyLog_NormalizedTo100-4zhaka',
+      'minzoom': 14.5,
+      'paint': {
+        'fill-extrusion-color': [
+          'interpolate',
+          ['linear'],
+          ['get', 'logdensity'],
+          0, '#00FF00',
+          41, '#FFFF00',
+          60, '#FF0000'
+        ],
+        'fill-extrusion-height': [
+          'interpolate',
+          ['linear'],
+          ['get', 'logdensity'],
+          0, 0,
+          100, 35 
+        ],
+        'fill-extrusion-base': 0,
+        'fill-extrusion-opacity': 0.9
+      }
+    });
+
+    // Add a black version of the density layer
+    map.addLayer({
+      'id': 'density-3d-black',
+      'type': 'fill-extrusion',
+      'source': 'density-tileset',
+      'source-layer': 'OnlyLog_NormalizedTo100-4zhaka',
+      'minzoom': 14.5,
+      'paint': {
+        'fill-extrusion-color': '#000000',
+        'fill-extrusion-height': [
+          'interpolate',
+          ['linear'],
+          ['get', 'logdensity'],
+          0, 0,
+          60, 35 
+        ],
+        'fill-extrusion-base': 0,
+        'fill-extrusion-opacity': 0
+      }
+    });
+
+    // Set up transitions
+    map.setPaintProperty('density-3d', 'fill-extrusion-opacity-transition', {duration: 300});
+    map.setPaintProperty('density-3d-black', 'fill-extrusion-opacity-transition', {duration: 300});
+
+    function flashTiles() {
+      // Fade out the colored layer and fade in the black layer
+      map.setPaintProperty('density-3d', 'fill-extrusion-opacity', 0);
+      map.setPaintProperty('density-3d-black', 'fill-extrusion-opacity', 0.6);
+
+      // After 300ms, reverse the process
+      setTimeout(() => {
+        map.setPaintProperty('density-3d', 'fill-extrusion-opacity', 1);
+        map.setPaintProperty('density-3d-black', 'fill-extrusion-opacity', 0);
+      }, 200);
+    }
+
+    // Flash tiles every 3 seconds
+    setInterval(flashTiles, 3000);
+  });
+</script>
+
+</body>
+</html>

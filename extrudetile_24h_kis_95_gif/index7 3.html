@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>3D Visualization with Mapbox and Tessellation</title>
+<meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css" rel="stylesheet">
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js"></script>
+<script src="https://unpkg.com/earcut@2.2.4/dist/earcut.min.js"></script>
+
+<style>
+  body { margin: 0; padding: 0; }
+  #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<script>
+mapboxgl.accessToken = 'pk.eyJ1Ijoic2xvbm8iLCJhIjoiY2p6Zmg2dDdlMDZzZTNib280Y3phN29jciJ9.JCddta2wHSt2t71JUVR7UQ';
+
+const map = new mapboxgl.Map({
+  container: 'map',
+  style: 'mapbox://styles/mapbox/dark-v10',
+  center: [9.192254, 45.462633],
+  zoom: 15.5,
+  minZoom: 15,
+  maxZoom: 20,
+  pitch: 45,
+  bearing: -17.6,
+  antialias: true
+});
+
+const customLayer = {
+  id: 'custom-extruded-layer',
+  type: 'custom',
+  renderingMode: '3d',
+
+  onAdd: function(map, gl) {
+    this.map = map;
+    this.gl = gl;
+
+    const vertexSource = `#version 300 es
+        in vec3 a_pos;
+        in float a_density;
+        in vec3 a_normal;
+        out float v_density;
+        out vec3 v_normal;
+        out float v_id; // Unique identifier
+
+        uniform mat4 u_matrix;
+
+        void main() {
+          v_density = a_density;
+          v_normal = a_normal;
+          v_id = fract((a_pos.x - 9.192254) * (a_pos.x - 9.192254) * (a_pos.y - 45.462633) * (a_pos.y - 45.462633) / 21.71828); // Simple pseudo-random based on position
+          gl_Position = u_matrix * vec4(a_pos, 1.0);
+        }
+    `;
+
+    const fragmentSource = `#version 300 es
+precision mediump float;
+in float v_density;
+in vec3 v_normal;
+in float v_id; // Unique identifier
+
+out vec4 fragColor;
+
+uniform float u_time;
+
+void main() {
+  float normalizedDensity = (v_density - 0.003665) / (0.0043 - 0.003665);
+  vec3 baseColor = mix(vec3(0.0, 0.0, 1.0), vec3(1.0, 0.0, 0.0), normalizedDensity);
+
+  float flashDuration = 0.3;
+
+  // Modify cycle duration by a pseudo-random factor derived from v_id
+  float randomFactor = mix(0.99, 1.01, v_id); // Random factor between 0.99 and 1.01
+  float cycleDuration = 60.0 / max(normalizedDensity * 10.0, 1.0) * randomFactor;
+  float t = mod(u_time, cycleDuration);
+
+  float fadeInStart = cycleDuration - flashDuration;
+  float fadeOutEnd = flashDuration;
+
+  float fadeIn = smoothstep(fadeInStart, cycleDuration, t);
+  float fadeOut = 1.0 - smoothstep(0.0, fadeOutEnd, t);
+
+  float blackness = max(fadeIn, fadeOut);
+
+  vec3 color = mix(baseColor, vec3(0.0), blackness);
+
+  // Simple lighting
+  vec3 lightDir = normalize(vec3(1.0, 1.0, 1.0));
+  float diffuse = max(dot(v_normal, lightDir), 0.0);
+  color *= (0.5 + 0.5 * diffuse);
+
+  fragColor = vec4(color, 0.7);
+}
+    `;
+
+    this.program = gl.createProgram();
+    this.setupShaders(vertexSource, fragmentSource);
+
+    this.aPos = gl.getAttribLocation(this.program, "a_pos");
+    this.aDensity = gl.getAttribLocation(this.program, "a_density");
+    this.aNormal = gl.getAttribLocation(this.program, "a_normal");
+    this.uMatrix = gl.getUniformLocation(this.program, "u_matrix");
+    this.uTime = gl.getUniformLocation(this.program, "u_time");
+
+    this.buffer = gl.createBuffer();
+    this.startTime = Date.now() - 5 * 60 * 1000; // 5 minutes offset
+  },
+
+  setupShaders: function(vertexSource, fragmentSource) {
+    const vertexShader = this.compileShader(vertexSource, this.gl.VERTEX_SHADER);
+    const fragmentShader = this.compileShader(fragmentSource, this.gl.FRAGMENT_SHADER);
+
+    this.gl.attachShader(this.program, vertexShader);
+    this.gl.attachShader(this.program, fragmentShader);
+    this.gl.linkProgram(this.program);
+
+    if (!this.gl.getProgramParameter(this.program, this.gl.LINK_STATUS)) {
+      console.error('Unable to initialize the shader program:', this.gl.getProgramInfoLog(this.program));
+    }
+  },
+
+  compileShader: function(source, type) {
+    const shader = this.gl.createShader(type);
+    this.gl.shaderSource(shader, source);
+    this.gl.compileShader(shader);
+
+    if (!this.gl.getShaderParameter(shader, this.gl.COMPILE_STATUS)) {
+      console.error('An error occurred compiling the shaders:', this.gl.getShaderInfoLog(shader));
+      this.gl.deleteShader(shader);
+      return null;
+    }
+
+    return shader;
+  },
+
+  processPolygon: function(coordinates, density) {
+    let data = {vertices: [], holes: [], dimensions: 2};
+    let holeIndex = 0;
+
+    coordinates.forEach((ring, i) => {
+      if (i > 0) {
+        holeIndex += coordinates[i - 1].length;
+        data.holes.push(holeIndex);
+      }
+
+      ring.forEach(coord => {
+        const point = mapboxgl.MercatorCoordinate.fromLngLat(coord);
+        data.vertices.push(point.x, point.y);
+      });
+    });
+
+    const triangles = earcut(data.vertices, data.holes, data.dimensions);
+
+    let vertexData = [];
+    const height = density * 0.0002; 
+
+    // Generate top face
+    for (let i = 0; i < triangles.length; i++) {
+      const index = triangles[i];
+      vertexData.push(
+        data.vertices[index * 2], data.vertices[index * 2 + 1], height,
+        density,
+        0, 0, 1 // Normal for top face
+      );
+    }
+
+    // Generate side faces
+    for (let i = 0; i < data.vertices.length / 2; i++) {
+      const nextI = (i + 1) % (data.vertices.length / 2);
+      const x1 = data.vertices[i * 2];
+      const y1 = data.vertices[i * 2 + 1];
+      const x2 = data.vertices[nextI * 2];
+      const y2 = data.vertices[nextI * 2 + 1];
+
+      // Calculate normal for the side face
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const length = Math.sqrt(dx * dx + dy * dy);
+      const nx = dy / length;
+      const ny = -dx / length;
+
+      vertexData.push(
+        x1, y1, 0, density, nx, ny, 0,
+        x2, y2, 0, density, nx, ny, 0,
+        x1, y1, height, density, nx, ny, 0,
+        x2, y2, 0, density, nx, ny, 0,
+        x2, y2, height, density, nx, ny, 0,
+        x1, y1, height, density, nx, ny, 0
+      );
+    }
+
+    return vertexData;
+  },
+
+  render: function(gl, matrix) {
+    const currentTime = (Date.now() - this.startTime) / 1000;
+    gl.useProgram(this.program);
+    
+    gl.uniformMatrix4fv(this.uMatrix, false, matrix);
+    gl.uniform1f(this.uTime, currentTime);
+
+    const features = this.map.querySourceFeatures('density-tileset', {
+      sourceLayer: 'KI_s_fixed-5pt5ls'
+    });
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
+    gl.enableVertexAttribArray(this.aPos);
+    gl.enableVertexAttribArray(this.aDensity);
+    gl.enableVertexAttribArray(this.aNormal);
+    gl.vertexAttribPointer(this.aPos, 3, gl.FLOAT, false, 28, 0);
+    gl.vertexAttribPointer(this.aDensity, 1, gl.FLOAT, false, 28, 12);
+    gl.vertexAttribPointer(this.aNormal, 3, gl.FLOAT, false, 28, 16);
+
+    gl.enable(gl.DEPTH_TEST);
+    gl.enable(gl.CULL_FACE);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+    features.forEach((feature) => {
+      const density = feature.properties.KI_s1795 || 0;
+      let vertexData = [];
+
+      if (feature.geometry.type === 'Polygon') {
+        vertexData = this.processPolygon(feature.geometry.coordinates, density);
+      } else if (feature.geometry.type === 'MultiPolygon') {
+        feature.geometry.coordinates.forEach(polygonCoords => {
+          vertexData = vertexData.concat(this.processPolygon(polygonCoords, density));
+        });
+      }
+
+      if (vertexData.length > 0) {
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertexData), gl.DYNAMIC_DRAW);
+        gl.drawArrays(gl.TRIANGLES, 0, vertexData.length / 7);
+      }
+    });
+
+    // Request the next frame
+    this.map.triggerRepaint();
+  }
+};
+
+map.on('load', () => {
+  map.addSource('density-tileset', {
+    'type': 'vector',
+    'url': 'mapbox://slono.8i8ljkrx'
+  });
+
+  map.addLayer({
+    'id': 'density-fill',
+    'type': 'fill',
+    'source': 'density-tileset',
+    'source-layer': 'KI_s_fixed-5pt5ls',
+    'paint': {
+      'fill-color': ['interpolate', ['linear'], ['get', 'KI_s1795'],
+        0.003665, '#0000ff',
+        0.0043, '#ff0000'
+      ],
+      'fill-opacity': 0.0
+    }
+  });
+
+  map.on('sourcedata', function(e) {
+    if (e.sourceId === 'density-tileset' && e.isSourceLoaded) {
+      if (!map.getLayer('custom-extruded-layer')) {
+        console.log('Adding custom extruded layer');
+        map.addLayer(customLayer);
+      }
+    }
+  });
+});
+</script>
+
+</body>
+</html>

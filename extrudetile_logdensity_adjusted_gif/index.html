@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Density Map with Mapbox GL JS</title>
+    <script src='https://api.mapbox.com/mapbox-gl-js/v2.9.1/mapbox-gl.js'></script>
+    <link href='https://api.mapbox.com/mapbox-gl-js/v2.9.1/mapbox-gl.css' rel='stylesheet' />
+    <style>
+        body { margin: 0; padding: 0; }
+        #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <script>
+    mapboxgl.accessToken = 'pk.eyJ1Ijoic2xvbm8iLCJhIjoiY2p6Zmg2dDdlMDZzZTNib280Y3phN29jciJ9.JCddta2wHSt2t71JUVR7UQ';
+
+    const map = new mapboxgl.Map({
+        container: 'map',
+        style: 'mapbox://styles/mapbox/dark-v10',
+        center: [9.192254, 45.462633],
+        zoom: 13,
+        pitch: 45,
+        bearing: 0,
+        antialias: true
+    });
+
+    const customLayer = {
+        id: 'custom-circle-layer',
+        type: 'custom',
+        renderingMode: '2d',
+        map: null,
+
+        onAdd: function(map, gl) {
+            this.map = map;
+
+            const vertexSource = `
+                attribute vec2 a_pos;
+                uniform mat4 u_matrix;
+                uniform float u_size;
+
+                void main() {
+                    gl_Position = u_matrix * vec4(a_pos, 0.0, 1.0);
+                    gl_PointSize = u_size;
+                }`;
+
+            const fragmentSource = `
+                precision mediump float;
+
+                void main() {
+                    float r = 0.0, delta = 0.0, alpha = 0.8;
+                    vec2 cxy = 2.0 * gl_PointCoord - 1.0;
+                    r = dot(cxy, cxy);
+                    if (r > 1.0) {
+                        discard;
+                    }
+                    gl_FragColor = vec4(0.0, 0.5, 1.0, alpha);
+                }`;
+
+            this.program = this.createProgram(gl, vertexSource, fragmentSource);
+
+            this.aPos = gl.getAttribLocation(this.program, "a_pos");
+            this.uMatrix = gl.getUniformLocation(this.program, "u_matrix");
+            this.uSize = gl.getUniformLocation(this.program, "u_size");
+
+            this.buffer = gl.createBuffer();
+        },
+
+        render: function(gl, matrix) {
+            if (!this.map) {
+                console.warn('Map reference not available');
+                return;
+            }
+
+            gl.useProgram(this.program);
+            
+            gl.uniformMatrix4fv(this.uMatrix, false, matrix);
+            gl.uniform1f(this.uSize, 5); // 5 pixel wide circles
+
+            const features = this.map.querySourceFeatures('density-tileset', {
+                sourceLayer: 'sidewalks_hour_avg_nowe-5k5hl7'
+            });
+
+            console.log('Number of features:', features.length);
+
+            if (features.length === 0) {
+                console.warn('No features found. Check if the source is loaded correctly.');
+                return;
+            }
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
+            gl.enableVertexAttribArray(this.aPos);
+            gl.vertexAttribPointer(this.aPos, 2, gl.FLOAT, false, 0, 0);
+
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+            let totalPoints = 0;
+            features.forEach((feature, index) => {
+                if (!feature.properties || feature.properties.count13 === undefined) {
+                    console.warn('Feature missing count13 property:', feature);
+                    return;
+                }
+
+                let count13 = Math.max(1, Math.ceil(parseFloat(feature.properties.count13)));
+                
+                if (index < 5) {
+                    console.log(`Feature ${index}:`, {
+                        type: feature.geometry.type,
+                        originalCount13: feature.properties.count13,
+                        roundedCount13: count13,
+                        coordinates: feature.geometry.coordinates.length
+                    });
+                }
+
+                let points = [];
+
+                if (feature.geometry.type === 'Polygon') {
+                    points = this.generateRandomPointsInPolygon(feature.geometry.coordinates, count13);
+                } else if (feature.geometry.type === 'MultiPolygon') {
+                    feature.geometry.coordinates.forEach(polygon => {
+                        points = points.concat(this.generateRandomPointsInPolygon(polygon, Math.ceil(count13 / feature.geometry.coordinates.length)));
+                    });
+                } else {
+                    console.warn('Unsupported geometry type:', feature.geometry.type);
+                    return;
+                }
+
+                if (points.length > 0) {
+                    const flatPoints = points.flat();
+                    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(flatPoints), gl.DYNAMIC_DRAW);
+                    gl.drawArrays(gl.POINTS, 0, points.length);
+                    totalPoints += points.length;
+                }
+            });
+
+            console.log('Total points drawn:', totalPoints);
+            console.log('Render complete');
+        },
+
+        createProgram: function(gl, vertexSource, fragmentSource) {
+            const vertexShader = this.createShader(gl, gl.VERTEX_SHADER, vertexSource);
+            const fragmentShader = this.createShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
+
+            const program = gl.createProgram();
+            gl.attachShader(program, vertexShader);
+            gl.attachShader(program, fragmentShader);
+            gl.linkProgram(program);
+
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                throw new Error('Unable to initialize the shader program: ' + gl.getProgramInfoLog(program));
+            }
+
+            return program;
+        },
+
+        createShader: function(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                throw new Error('An error occurred compiling the shaders: ' + gl.getShaderInfoLog(shader));
+            }
+
+            return shader;
+        },
+
+        generateRandomPointsInPolygon: function(polygon, count) {
+            const points = [];
+            const bounds = this.getBounds(polygon);
+
+            for (let i = 0; i < count; i++) {
+                let point;
+                do {
+                    point = [
+                        bounds.minX + Math.random() * (bounds.maxX - bounds.minX),
+                        bounds.minY + Math.random() * (bounds.maxY - bounds.minY)
+                    ];
+                } while (!this.pointInPolygon(point, polygon));
+
+                points.push(point);
+            }
+
+            return points;
+        },
+
+        getBounds: function(polygon) {
+            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+            polygon[0].forEach(coord => {
+                minX = Math.min(minX, coord[0]);
+                maxX = Math.max(maxX, coord[0]);
+                minY = Math.min(minY, coord[1]);
+                maxY = Math.max(maxY, coord[1]);
+            });
+            return { minX, minY, maxX, maxY };
+        },
+
+        pointInPolygon: function(point, polygon) {
+            let inside = false;
+            for (let i = 0, j = polygon[0].length - 1; i < polygon[0].length; j = i++) {
+                let xi = polygon[0][i][0], yi = polygon[0][i][1];
+                let xj = polygon[0][j][0], yj = polygon[0][j][1];
+                let intersect = ((yi > point[1]) != (yj > point[1])) && (point[0] < (xj - xi) * (point[1] - yi) / (yj - yi) + xi);
+                if (intersect) inside = !inside;
+            }
+            return inside;
+        }
+    };
+
+    map.on('load', () => {
+        map.addSource('density-tileset', {
+            'type': 'vector',
+            'url': 'mapbox://slono.93p0ifrq'
+        });
+
+        // Add the fill layer
+        map.addLayer({
+            'id': 'density-fill',
+            'type': 'fill',
+            'source': 'density-tileset',
+            'source-layer': 'sidewalks_hour_avg_nowe-5k5hl7',
+            'paint': {
+                'fill-color': [
+                    'interpolate',
+                    ['linear'],
+                    ['get', 'count13'],
+                    0, 'rgba(255, 255, 255, 0.1)',
+                    10, 'rgba(255, 220, 0, 0.2)',
+                    50, 'rgba(255, 0, 0, 0.3)'
+                ],
+                'fill-outline-color': 'rgba(0, 0, 0, 0.5)'
+            }
+        });
+
+        // Add the circle layer
+        map.addLayer({
+            'id': 'density-points',
+            'type': 'circle',
+            'source': 'density-tileset',
+            'source-layer': 'sidewalks_hour_avg_nowe-5k5hl7',
+            'paint': {
+                'circle-radius': 3,
+                'circle-color': 'rgba(0, 100, 255, 0.8)',
+                'circle-stroke-width': 1,
+                'circle-stroke-color': 'white'
+            }
+        });
+
+        // Add the custom layer
+        map.addLayer(customLayer);
+
+        map.on('sourcedata', (e) => {
+            if (e.sourceId === 'density-tileset' && e.isSourceLoaded) {
+                console.log('Source loaded:', e.sourceId);
+                map.triggerRepaint();
+            }
+        });
+
+        map.on('error', (e) => {
+            console.error('Mapbox GL JS error:', e);
+        });
+    });
+    </script>
+</body>
+</html>

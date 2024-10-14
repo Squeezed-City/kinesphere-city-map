@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>3D Density Visualization with Mapbox and Tessellation</title>
+    <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+    <link href="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css" rel="stylesheet">
+    <script src="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js"></script>
+    <script src="https://unpkg.com/earcut@2.2.4/dist/earcut.min.js"></script>
+
+    <style>
+        body { margin: 0; padding: 0; }
+        #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <script>
+    mapboxgl.accessToken = 'pk.eyJ1Ijoic2xvbm8iLCJhIjoiY2p6Zmg2dDdlMDZzZTNib280Y3phN29jciJ9.JCddta2wHSt2t71JUVR7UQ';
+
+    const map = new mapboxgl.Map({
+        container: 'map',
+        style: 'mapbox://styles/mapbox/dark-v10',
+        center: [9.192254, 45.462633],
+        zoom: 15.5,
+        pitch: 45,
+        bearing: -17.6,
+        antialias: true
+    });
+
+    const customLayer = {
+        id: 'custom-extruded-layer',
+        type: 'custom',
+        renderingMode: '3d',
+
+        onAdd: function(map, gl) {
+            this.map = map;
+            this.gl = gl;
+
+            const vertexSource = `#version 300 es
+                in vec3 a_pos;
+                in float a_count13;
+                in vec3 a_normal;
+                out float v_count13;
+                out vec3 v_normal;
+
+                uniform mat4 u_matrix;
+
+                void main() {
+                    v_count13 = a_count13;
+                    v_normal = a_normal;
+                    gl_Position = u_matrix * vec4(a_pos, 1.0);
+                }`;
+
+            const fragmentSource = `#version 300 es
+                precision mediump float;
+                in float v_count13;
+                in vec3 v_normal;
+                out vec4 fragColor;
+
+                uniform float u_time;
+
+                void main() {
+                    float normalizedCount = v_count13 / 100.0; // Adjust this normalization factor if needed
+                    vec3 baseColor = mix(vec3(0.0, 0.0, 1.0), vec3(1.0, 0.0, 0.0), normalizedCount);
+                    
+                    float flashDuration = 0.3;
+                    float cycleDuration = 60.0 / max(v_count13, 1.0);
+                    float t = mod(u_time, cycleDuration) / cycleDuration;
+                    
+                    float fadeInStart = 0.8;
+                    float fadeOutEnd = 0.2;
+                    
+                    float fadeIn = smoothstep(fadeInStart, 1.0, t);
+                    float fadeOut = 1.0 - smoothstep(0.0, fadeOutEnd, t);
+                    
+                    float blackness = max(fadeIn, fadeOut);
+                    
+                    vec3 color = mix(baseColor, vec3(0.0), blackness);
+
+                    vec3 lightDir = normalize(vec3(1.0, 1.0, 1.0));
+                    float diffuse = max(dot(v_normal, lightDir), 0.0);
+                    color *= (0.5 + 0.5 * diffuse);
+
+                    fragColor = vec4(color, 0.8);
+                }`;
+
+            this.program = gl.createProgram();
+            this.setupShaders(vertexSource, fragmentSource);
+
+            this.aPos = gl.getAttribLocation(this.program, "a_pos");
+            this.aCount13 = gl.getAttribLocation(this.program, "a_count13");
+            this.aNormal = gl.getAttribLocation(this.program, "a_normal");
+            this.uMatrix = gl.getUniformLocation(this.program, "u_matrix");
+            this.uTime = gl.getUniformLocation(this.program, "u_time");
+
+            this.buffer = gl.createBuffer();
+            this.startTime = Date.now();
+
+            this.animate();
+        },
+
+        setupShaders: function(vertexSource, fragmentSource) {
+            const vertexShader = this.compileShader(vertexSource, this.gl.VERTEX_SHADER);
+            const fragmentShader = this.compileShader(fragmentSource, this.gl.FRAGMENT_SHADER);
+
+            this.gl.attachShader(this.program, vertexShader);
+            this.gl.attachShader(this.program, fragmentShader);
+            this.gl.linkProgram(this.program);
+
+            if (!this.gl.getProgramParameter(this.program, this.gl.LINK_STATUS)) {
+                console.error('Unable to initialize the shader program:', this.gl.getProgramInfoLog(this.program));
+            }
+        },
+
+        compileShader: function(source, type) {
+            const shader = this.gl.createShader(type);
+            this.gl.shaderSource(shader, source);
+            this.gl.compileShader(shader);
+
+            if (!this.gl.getShaderParameter(shader, this.gl.COMPILE_STATUS)) {
+                console.error('An error occurred compiling the shaders:', this.gl.getShaderInfoLog(shader));
+                this.gl.deleteShader(shader);
+                return null;
+            }
+
+            return shader;
+        },
+
+        processPolygon: function(coordinates, count13) {
+            console.log('Processing polygon with count13:', count13);
+
+            let data = {vertices: [], holes: [], dimensions: 2};
+            let holeIndex = 0;
+
+            coordinates.forEach((ring, i) => {
+                if (i > 0) {
+                    holeIndex += coordinates[i - 1].length;
+                    data.holes.push(holeIndex);
+                }
+
+                ring.forEach(coord => {
+                    const point = mapboxgl.MercatorCoordinate.fromLngLat(coord);
+                    data.vertices.push(point.x, point.y);
+                });
+            });
+
+            const triangles = earcut(data.vertices, data.holes, data.dimensions);
+            const vertexData = [];
+            const heightScaleFactor = 0.00000005; // Adjust this factor for desired extrusion height
+            const height = count13 * heightScaleFactor;
+
+            console.log('Extrusion height:', height);
+
+            for (let i = 0; i < triangles.length; i += 3) {
+                const indices = [triangles[i], triangles[i + 1], triangles[i + 2]];
+                
+                // Top face
+                for (let j = 0; j < 3; j++) {
+                    const index = indices[j];
+                    vertexData.push(
+                        data.vertices[index * 2], data.vertices[index * 2 + 1], height,
+                        count13,
+                        0, 0, 1 // Normal for top face
+                    );
+                }
+
+                // Bottom face
+                for (let j = 2; j >= 0; j--) {
+                    const index = indices[j];
+                    vertexData.push(
+                        data.vertices[index * 2], data.vertices[index * 2 + 1], 0,
+                        count13,
+                        0, 0, -1 // Normal for bottom face
+                    );
+                }
+
+                // Side faces
+                for (let j = 0; j < 3; j++) {
+                    const currentIndex = indices[j];
+                    const nextIndex = indices[(j + 1) % 3];
+
+                    const x1 = data.vertices[currentIndex * 2];
+                    const y1 = data.vertices[currentIndex * 2 + 1];
+                    const x2 = data.vertices[nextIndex * 2];
+                    const y2 = data.vertices[nextIndex * 2 + 1];
+
+                    const dx = x2 - x1;
+                    const dy = y2 - y1;
+                    const length = Math.sqrt(dx * dx + dy * dy);
+                    const nx = dy / length;
+                    const ny = -dx / length;
+
+                    vertexData.push(
+                        x1, y1, 0, count13, nx, ny, 0,
+                        x2, y2, 0, count13, nx, ny, 0,
+                        x1, y1, height, count13, nx, ny, 0,
+                        x2, y2, 0, count13, nx, ny, 0,
+                        x2, y2, height, count13, nx, ny, 0,
+                        x1, y1, height, count13, nx, ny, 0
+                    );
+                }
+            }
+
+            return vertexData;
+        },
+
+        render: function(gl, matrix) {
+            const currentTime = (Date.now() - this.startTime) / 1000;
+            gl.useProgram(this.program);
+            
+            gl.uniformMatrix4fv(this.uMatrix, false, matrix);
+            gl.uniform1f(this.uTime, currentTime);
+
+            const features = this.map.querySourceFeatures('density-tileset', {
+                sourceLayer: 'sidewalks_hour_avg_nowe-5k5hl7'
+            });
+
+            console.log('Number of features:', features.length);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
+            gl.enableVertexAttribArray(this.aPos);
+            gl.enableVertexAttribArray(this.aCount13);
+            gl.enableVertexAttribArray(this.aNormal);
+
+            gl.vertexAttribPointer(this.aPos, 3, gl.FLOAT, false, 28, 0);
+            gl.vertexAttribPointer(this.aCount13, 1, gl.FLOAT, false, 28, 12);
+            gl.vertexAttribPointer(this.aNormal, 3, gl.FLOAT, false, 28, 16);
+
+            gl.enable(gl.DEPTH_TEST);
+            gl.enable(gl.CULL_FACE);
+
+            let totalVertices = 0;
+
+            features.forEach((feature) => {
+                if (!feature.properties || feature.properties.count13 === undefined) {
+                    console.warn('Feature missing count13 property:', feature);
+                    return;
+                }
+
+                let vertexData = [];
+
+                if (feature.geometry.type === 'Polygon') {
+                    vertexData.push(...this.processPolygon(feature.geometry.coordinates, feature.properties.count13));
+                } else if (feature.geometry.type === 'MultiPolygon') {
+                    feature.geometry.coordinates.forEach(polygon => {
+                        vertexData.push(...this.processPolygon(polygon, feature.properties.count13));
+                    });
+                } else {
+                    console.warn('Unsupported geometry type:', feature.geometry.type);
+                    return;
+                }
+
+                if (vertexData.length > 0) {
+                    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertexData), gl.DYNAMIC_DRAW);
+                    gl.drawArrays(gl.TRIANGLES, 0, vertexData.length / 7);
+                    totalVertices += vertexData.length / 7;
+                }
+            });
+
+            console.log('Total vertices drawn:', totalVertices);
+        },
+
+        animate: function() {
+            this.map.triggerRepaint();
+            requestAnimationFrame(this.animate.bind(this));
+        }
+    };
+
+    map.on('load', () => {
+        map.addSource('density-tileset', {
+            'type': 'vector',
+            'url': 'mapbox://slono.93p0ifrq'
+        });
+
+        map.addLayer({
+            'id': 'density-fill',
+            'type': 'fill',
+            'source': 'density-tileset',
+            'source-layer': 'sidewalks_hour_avg_nowe-5k5hl7',
+            'paint': {
+                'fill-color': [
+                    'interpolate',
+                    ['linear'],
+                    ['get', 'count13'],
+                    0, '#0000ff',
+                    100, '#ff0000'
+                ],
+                'fill-opacity': 0.0
+            }
+        });
+
+        map.on('sourcedata', function(e) {
+            if (e.sourceId === 'density-tileset' && e.isSourceLoaded) {
+                if (!map.getLayer('custom-extruded-layer')) {
+                    console.log('Adding custom extruded layer');
+                    map.addLayer(customLayer);
+                }
+            }
+        });
+
+        map.on('prerender', () => {
+            if (map.getLayer('custom-extruded-layer')) {
+                map.triggerRepaint();
+            }
+        });
+    });
+    </script>
+</body>
+</html>

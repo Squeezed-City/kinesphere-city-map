@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>2D Visualization with Mapbox</title>
+  <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+  <link href="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css" rel="stylesheet">
+  <script src="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@turf/turf"></script>
+  <style>
+    body { margin: 0; padding: 0; }
+    #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+    #hour-display {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background-color: rgba(0, 0, 0, 0.5);
+      color: white;
+      padding: 5px 10px;
+      font-family: Arial, sans-serif;
+      font-size: 46px;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="hour-display">Hour: 00</div>
+
+  <script>
+    mapboxgl.accessToken = 'pk.eyJ1Ijoic2xvbm8iLCJhIjoiY2p6Zmg2dDdlMDZzZTNib280Y3phN29jciJ9.JCddta2wHSt2t71JUVR7UQ';
+
+    const map = new mapboxgl.Map({
+      container: 'map',
+      style: 'mapbox://styles/mapbox/light-v10',
+      center: [9.192254, 45.462633],
+      zoom: 15.3,
+    });
+
+    let currentHour = 0;
+    const hourDisplay = document.getElementById('hour-display');
+
+    function updateHourDisplay() {
+      hourDisplay.textContent = `Hour: ${currentHour.toString().padStart(2, '0')}`;
+    }
+
+    function getNextHour() {
+      currentHour = (currentHour + 1) % 24;
+      updateHourDisplay();
+      return `count${currentHour.toString().padStart(2, '0')}`;
+    }
+
+    map.on('load', () => {
+      map.addSource('density-tileset', {
+        type: 'vector',
+        url: 'mapbox://slono.93p0ifrq'
+      });
+
+      map.addLayer({
+        id: 'density-2d',
+        type: 'fill',
+        source: 'density-tileset',
+        'source-layer': 'sidewalks_hour_avg_nowe-5k5hl7',
+        minzoom: 14.5,
+        paint: {
+          'fill-color': [
+            'interpolate',
+            ['linear'],
+            ['get', 'count00'],
+            0, '#e6f7ff',
+            81, '#3399ff',
+            200, '#0066cc'
+          ],
+          'fill-opacity': 0.7
+        }
+      });
+
+      map.addLayer({
+        id: 'density-outline',
+        type: 'line',
+        source: 'density-tileset',
+        'source-layer': 'sidewalks_hour_avg_nowe-5k5hl7',
+        minzoom: 14.5,
+        paint: {
+          'line-color': '#000000',
+          'line-width': 1
+        }
+      });
+
+      function updateDensityLayer() {
+        const nextHourField = getNextHour();
+        map.setPaintProperty('density-2d', 'fill-color', [
+          'interpolate',
+          ['linear'],
+          ['get', nextHourField],
+          0, '#e6f7ff',
+          81, '#3399ff',
+          200, '#0066cc'
+        ]);
+        generateDotsForSidewalks();
+      }
+
+      setInterval(updateDensityLayer, 1000); // Update every second
+
+      function generateDotsForSidewalks() {
+        const sidewalkData = map.querySourceFeatures('density-tileset', {
+          sourceLayer: 'sidewalks_hour_avg_nowe-5k5hl7'
+        });
+
+        if (!sidewalkData || sidewalkData.length === 0) {
+          console.error('No features found in sidewalks_hour_avg_nowe-5k5hl7 source layer');
+          return;
+        }
+
+        const features = [];
+        const currentHourField = `count${currentHour.toString().padStart(2, '0')}`;
+
+        sidewalkData.forEach(sidewalk => {
+          const peopleCount = Math.floor(sidewalk.properties[currentHourField] || 0);
+          
+          for (let i = 0; i < peopleCount; i++) {
+            const point = getRandomPointInPolygon(sidewalk);
+            if (point) {
+              features.push({
+                type: 'Feature',
+                geometry: {
+                  type: 'Point',
+                  coordinates: point.geometry.coordinates,
+                },
+                properties: {
+                  sidewalkId: sidewalk.id
+                }
+              });
+            }
+          }
+        });
+
+        if (!map.getSource('people-dots')) {
+          map.addSource('people-dots', {
+            type: 'geojson',
+            data: {
+              type: 'FeatureCollection',
+              features: features,
+            }
+          });
+
+          map.addLayer({
+            id: 'people-dots',
+            type: 'circle',
+            source: 'people-dots',
+            paint: {
+              'circle-radius': 2,
+              'circle-color': '#ff4d4d',
+              'circle-opacity': 0.8
+            }
+          });
+        } else {
+          map.getSource('people-dots').setData({
+            type: 'FeatureCollection',
+            features: features,
+          });
+        }
+      }
+    });
+
+    function getRandomPointInPolygon(feature) {
+      const bbox = turf.bbox(feature);
+      let point;
+      let tries = 0;
+      const maxTries = 100;
+
+      do {
+        point = turf.randomPoint(1, { bbox: bbox }).features[0];
+        tries++;
+        if (tries > maxTries) {
+          console.warn('Max tries reached for feature:', feature);
+          return null;
+        }
+      } while (!turf.booleanPointInPolygon(point, feature));
+
+      return point;
+    }
+  </script>
+</body>
+</html>

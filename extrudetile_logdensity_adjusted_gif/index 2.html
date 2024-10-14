@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>3D Visualization with Mapbox and Shader Animation</title>
+<meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css" rel="stylesheet">
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js"></script>
+<style>
+  body { margin: 0; padding: 0; }
+  #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<script>
+mapboxgl.accessToken = 'pk.eyJ1Ijoic2xvbm8iLCJhIjoiY2p6Zmg2dDdlMDZzZTNib280Y3phN29jciJ9.JCddta2wHSt2t71JUVR7UQ';
+
+const map = new mapboxgl.Map({
+  container: 'map',
+  style: 'mapbox://styles/mapbox/dark-v10',
+  center: [9.192254, 45.462633],
+  zoom: 15.5,
+  minZoom: 15,
+  maxZoom: 16,
+  pitch: 45,
+  bearing: -17.6,
+});
+
+map.on('load', () => {
+  map.addSource('density-tileset', {
+    'type': 'vector',
+    'url': 'mapbox://slono.bj7soaw3'
+  });
+
+  map.addLayer({
+    'id': 'density-fill',
+    'type': 'fill',
+    'source': 'density-tileset',
+    'source-layer': 'OnlyLog_NormalizedTo100-4zhaka',
+    'paint': {
+      'fill-color': ['interpolate', ['linear'], ['get', 'logdensity'],
+        0, '#0000ff',
+        100, '#ff0000'
+      ],
+      'fill-opacity': 0.7
+    }
+  });
+
+  const customLayer = {
+    id: 'custom-animated-layer',
+    type: 'custom',
+    renderingMode: '3d',
+
+    onAdd: function(map, gl) {
+      this.map = map;
+      const vertexSource = `
+        attribute vec2 a_pos;
+        attribute float a_logdensity;
+        varying float v_logdensity;
+
+        void main() {
+          v_logdensity = a_logdensity;
+          gl_Position = vec4(a_pos, 0.0, 1.0);
+        }
+      `;
+
+      const fragmentSource = `
+        precision mediump float;
+        varying float v_logdensity;
+
+        void main() {
+          gl_FragColor = vec4(0.0, 1.0, 0.0, 0.5);  // Green with 50% opacity
+        }
+      `;
+
+      this.program = gl.createProgram();
+      this.setupShaders(gl, vertexSource, fragmentSource);
+
+      this.aPos = gl.getAttribLocation(this.program, "a_pos");
+      this.aLogdensity = gl.getAttribLocation(this.program, "a_logdensity");
+
+      this.buffer = gl.createBuffer();
+    },
+
+    setupShaders: function(gl, vertexSource, fragmentSource) {
+      const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+      gl.shaderSource(vertexShader, vertexSource);
+      gl.compileShader(vertexShader);
+
+      const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+      gl.shaderSource(fragmentShader, fragmentSource);
+      gl.compileShader(fragmentShader);
+
+      gl.attachShader(this.program, vertexShader);
+      gl.attachShader(this.program, fragmentShader);
+      gl.linkProgram(this.program);
+    },
+
+    render: function(gl, matrix) {
+      gl.useProgram(this.program);
+
+      const features = this.map.querySourceFeatures('density-tileset', {
+        sourceLayer: 'OnlyLog_NormalizedTo100-4zhaka'
+      });
+
+      console.log(`Number of features: ${features.length}`);
+
+      let vertexData = [];
+
+      features.forEach((feature, index) => {
+        if (feature.geometry.type === 'Polygon') {
+          const logdensity = feature.properties.logdensity || 0;
+          const coords = feature.geometry.coordinates[0];
+
+          for (let i = 1; i < coords.length - 1; i++) {
+            const a = this.project(coords[0]);
+            const b = this.project(coords[i]);
+            const c = this.project(coords[i + 1]);
+            vertexData.push(
+              a.x, a.y, logdensity,
+              b.x, b.y, logdensity,
+              c.x, c.y, logdensity
+            );
+
+            if (index === 0 && i === 1) {
+              console.log(`First polygon vertex projected positions:`);
+              console.log(`A: (${a.x}, ${a.y})`);
+              console.log(`B: (${b.x}, ${b.y})`);
+              console.log(`C: (${c.x}, ${c.y})`);
+              console.log(`First polygon vertex original coordinates:`);
+              console.log(`A: (${coords[0][0]}, ${coords[0][1]})`);
+              console.log(`B: (${coords[i][0]}, ${coords[i][1]})`);
+              console.log(`C: (${coords[i+1][0]}, ${coords[i+1][1]})`);
+            }
+          }
+        }
+      });
+
+      console.log(`Total vertices: ${vertexData.length / 3}`);
+
+      if (vertexData.length > 0) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertexData), gl.DYNAMIC_DRAW);
+
+        gl.enableVertexAttribArray(this.aPos);
+        gl.vertexAttribPointer(this.aPos, 2, gl.FLOAT, false, 12, 0);
+
+        gl.enableVertexAttribArray(this.aLogdensity);
+        gl.vertexAttribPointer(this.aLogdensity, 1, gl.FLOAT, false, 12, 8);
+
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+        gl.drawArrays(gl.TRIANGLES, 0, vertexData.length / 3);
+      } else {
+        console.log("No features to render");
+      }
+    },
+
+    project: function(coord) {
+      const center = this.map.getCenter();
+      const projected = mapboxgl.MercatorCoordinate.fromLngLat(coord);
+      const centerProjected = mapboxgl.MercatorCoordinate.fromLngLat(center);
+      
+      const dx = projected.x - centerProjected.x;
+      const dy = projected.y - centerProjected.y;
+      
+      const scale = 50000;  // Adjust this value to change the size of the polygons
+      
+      return {
+        x: dx * scale,
+        y: -dy * scale  // Flip the y-axis
+      };
+    }
+  };
+
+  map.on('sourcedata', function(e) {
+    if (e.sourceId === 'density-tileset' && e.isSourceLoaded) {
+      if (!map.getLayer('custom-animated-layer')) {
+        console.log('Adding custom layer');
+        map.addLayer(customLayer);
+      }
+    }
+  });
+});
+</script>
+
+</body>
+</html>

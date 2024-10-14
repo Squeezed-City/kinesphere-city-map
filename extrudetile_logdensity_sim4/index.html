@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>3D Visualization with Mapbox</title>
+  <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+  <link href="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css" rel="stylesheet">
+  <script src="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@turf/turf"></script>
+  <style>
+    body { margin: 0; padding: 0; }
+    #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <script>
+    mapboxgl.accessToken = 'pk.eyJ1Ijoic2xvbm8iLCJhIjoiY2p6Zmg2dDdlMDZzZTNib280Y3phN29jciJ9.JCddta2wHSt2t71JUVR7UQ';
+
+    const map = new mapboxgl.Map({
+      container: 'map',
+      style: 'mapbox://styles/mapbox/dark-v10',
+      center: [9.192254, 45.462633],
+      zoom: 15.3,
+      pitch: 45,
+      bearing: -17.6,
+    });
+
+    map.on('load', () => {
+      map.addSource('density-tileset', {
+        type: 'vector',
+        url: 'mapbox://slono.93p0ifrq'
+      });
+
+      map.addLayer({
+        id: '3d-buildings',
+        source: 'composite',
+        'source-layer': 'building',
+        filter: ['==', 'extrude', 'true'],
+        type: 'fill-extrusion',
+        minzoom: 14.5,
+        paint: {
+          'fill-extrusion-color': '#aaa',
+          'fill-extrusion-height': ['get', 'height'],
+          'fill-extrusion-opacity': 0.6
+        }
+      });
+
+      map.addLayer({
+        id: 'density-3d',
+        type: 'fill',
+        source: 'density-tileset',
+        'source-layer': 'sidewalks_hour_avg_nowe-5k5hl7',
+        minzoom: 14.5,
+        paint: {
+          'fill-color': [
+            'interpolate',
+            ['linear'],
+            ['get', 'count13'],
+            0, '#00FF00',
+            81, '#FFFF00',
+            200, '#FF0000'
+          ],
+          'fill-opacity': 0.9
+        }
+      });
+
+      map.on('idle', () => {
+        const sidewalkData = map.querySourceFeatures('density-tileset', {
+          sourceLayer: 'sidewalks_hour_avg_nowe-5k5hl7'
+        });
+
+        if (!sidewalkData || sidewalkData.length === 0) {
+          console.error('No features found in sidewalks_hour_avg_nowe-5k5hl7 source layer');
+          return;
+        }
+
+        generateDotsForSidewalks(sidewalkData);
+      });
+    });
+
+    function generateDotsForSidewalks(sidewalks) {
+      const features = [];
+
+      sidewalks.forEach(sidewalk => {
+        const peopleCount = Math.floor(sidewalk.properties.count13 || 0);
+        
+        for (let i = 0; i < peopleCount; i++) {
+          const point = getRandomPointInPolygon(sidewalk);
+          if (point) {
+            features.push({
+              type: 'Feature',
+              geometry: {
+                type: 'Point',
+                coordinates: point.geometry.coordinates,
+              },
+              properties: {
+                sidewalkId: sidewalk.id
+              }
+            });
+          }
+        }
+      });
+
+      if (!map.getSource('people-dots')) {
+        map.addSource('people-dots', {
+          type: 'geojson',
+          data: {
+            type: 'FeatureCollection',
+            features: features,
+          }
+        });
+
+        map.addLayer({
+          id: 'people-dots',
+          type: 'circle',
+          source: 'people-dots',
+          paint: {
+            'circle-radius': 3,
+            'circle-color': '#000000',
+            'circle-opacity': 0.8
+          }
+        });
+      } else {
+        map.getSource('people-dots').setData({
+          type: 'FeatureCollection',
+          features: features,
+        });
+      }
+    }
+
+    function getRandomPointInPolygon(feature) {
+      const bbox = turf.bbox(feature);
+      let point;
+      let tries = 0;
+      const maxTries = 100;
+
+      do {
+        point = turf.randomPoint(1, { bbox: bbox }).features[0];
+        tries++;
+        if (tries > maxTries) {
+          console.warn('Max tries reached for feature:', feature);
+          return null;
+        }
+      } while (!turf.booleanPointInPolygon(point, feature));
+
+      return point;
+    }
+  </script>
+</body>
+</html>
+
+
